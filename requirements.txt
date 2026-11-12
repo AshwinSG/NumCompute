@@ -1,5 +1,6 @@
 numpy>=1.23
+matplotlib>=3.5
+
 # development / demo
 pytest>=7
 jupyter
-matplotlib
