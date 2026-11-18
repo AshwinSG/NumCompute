@@ -1,15 +1,15 @@
-"""Chain transformers and a final estimator, with streaming support.
+"""Chain transformers and a final model, with support for data in chunks.
 
-``Pipeline.partial_fit(X_chunk, y_chunk)`` runs, for each transformer in
-order, ``partial_fit(chunk)`` followed by ``transform(chunk)`` and feeds the
-result to the next step; the final estimator receives
-``partial_fit(transformed_chunk, y_chunk)``.
+Pipeline.partial_fit(X_chunk, y_chunk) goes through each transformer in
+order, calls partial_fit(chunk) and then transform(chunk), and passes the
+result to the next step. The final model gets
+partial_fit(transformed_chunk, y_chunk).
 
-Note on buffered models: a :class:`DecisionTreeClassifier` buffers the
-*transformed* rows, so rows buffered early were transformed with slightly
-older statistics than rows buffered later. Trees only compare values within
-a feature, so this mainly matters during the first few chunks while scaler
-statistics are still settling.
+Note on buffered models: a DecisionTreeClassifier stores the transformed
+rows, so rows stored early were scaled with slightly older statistics than
+rows stored later. A tree only compares values within one feature, so this
+mostly matters in the first few chunks while the scaler statistics are still
+settling.
 """
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ from .utils import NotFittedError
 
 
 class Pipeline:
-    """Sequential pipeline: ``[(name, transformer), ..., (name, estimator)]``.
+    """Runs steps in order: [(name, transformer), ..., (name, model)].
 
-    Every step except the last must implement ``partial_fit`` / ``transform``
-    (and ``fit`` for batch use). The last step must implement
-    ``partial_fit`` / ``fit`` / ``predict``.
+    Every step except the last must have partial_fit and transform (and fit
+    for use on the whole dataset). The last step must have partial_fit, fit
+    and predict.
     """
 
     def __init__(self, steps: List[Tuple[str, object]]):
@@ -58,7 +58,7 @@ class Pipeline:
 
     # ----------------------------------------------------------- streaming
     def partial_fit(self, X_chunk, y_chunk=None, **fit_params):
-        """Incrementally update every step with one chunk."""
+        """Update every step with one chunk."""
         Xt = X_chunk
         for _, step in self.transformers:
             step.partial_fit(Xt, y_chunk)
@@ -67,12 +67,12 @@ class Pipeline:
         return self
 
     def flush(self):
-        """Forward ``flush()`` to the final estimator if it buffers data."""
+        """Pass flush() on to the final model if it buffers data."""
         if hasattr(self.final_estimator, "flush"):
             self.final_estimator.flush()
         return self
 
-    # --------------------------------------------------------------- batch
+    # -------------------------------------------------------- whole dataset
     def fit(self, X, y=None):
         Xt = X
         for _, step in self.transformers:
@@ -81,7 +81,7 @@ class Pipeline:
         return self
 
     def transform(self, X):
-        """Apply all transformers (not the final estimator)."""
+        """Run all transformers (not the final model)."""
         Xt = X
         for name, step in self.transformers:
             try:

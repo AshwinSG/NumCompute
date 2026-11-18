@@ -1,15 +1,15 @@
-"""NumCompute – a NumPy-only, streaming, decision-tree learning framework.
+"""NumCompute stream: a NumPy-only package for training decision trees on
+data that arrives in chunks.
 
-Modules
--------
-io             CSV loading / chunked streaming
-stats          streaming mean/var/quantiles/histograms (``update_stats``)
-preprocessing  StandardScaler, MinMaxScaler, SimpleImputer, OneHotEncoder
-tree           DecisionTreeClassifier with buffered retraining
-metrics        functional + streaming classification metrics
-pipeline       Pipeline with ``partial_fit``
-stream         StreamTrainer (prequential test-then-train driver)
-visualise      matplotlib plotting helpers
+Modules:
+    io             load CSV files, or read them in chunks
+    stats          running mean, variance, quantiles and histograms (update_stats)
+    preprocessing  StandardScaler, MinMaxScaler, SimpleImputer, OneHotEncoder
+    tree           DecisionTreeClassifier that retrains from a buffer
+    metrics        metric functions and running metrics
+    pipeline       Pipeline with partial_fit
+    stream         StreamTrainer (tests on each chunk, then trains on it)
+    visualise      matplotlib plot helpers
 """
 from .io import iter_array_chunks, iter_csv_chunks, load_csv, save_csv
 from .metrics import (StreamingAccuracy, StreamingAUC, StreamingConfusionMatrix,

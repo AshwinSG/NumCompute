@@ -1,16 +1,15 @@
-"""CSV input/output for NumCompute (plain Python ``csv`` + NumPy only).
+"""Read and write CSV files for NumCompute (plain Python csv module and NumPy only).
 
-Two entry points:
+Two main functions:
+    load_csv reads a whole file into (X, y) arrays.
+    iter_csv_chunks reads a file in chunks of a fixed size, so the whole file
+    is never held in memory, and yields (X_chunk, y_chunk).
 
-* :func:`load_csv` – read a whole file into ``(X, y)`` arrays.
-* :func:`iter_csv_chunks` – stream a file in fixed-size chunks without ever
-  holding it in memory, yielding ``(X_chunk, y_chunk)``.
-
-Missing-value tokens (``""``, ``"NA"``, ``"NaN"``, ``"?"`` ...) become ``np.nan``
-in numeric columns and ``None`` in categorical (string) columns.
-If every feature column is numeric, ``X`` is ``float64``; if any column is
-categorical, ``X`` is an ``object`` array so strings survive until a
-:class:`~numcompute_stream.preprocessing.OneHotEncoder` converts them.
+Missing values ("", "NA", "NaN", "?" and so on) become np.nan in number
+columns and None in text (category) columns.
+If every feature column holds numbers, X is float64. If any column holds
+categories, X is an object array so the strings are kept until a
+OneHotEncoder turns them into numbers.
 """
 from __future__ import annotations
 
@@ -24,12 +23,12 @@ import numpy as np
 DEFAULT_MISSING = ("", "na", "nan", "null", "none", "?")
 
 CSVData = namedtuple("CSVData", ["X", "y", "feature_names", "categorical_idx"])
-CSVData.__doc__ = """Result of :func:`load_csv`.
+CSVData.__doc__ = """Result of load_csv.
 
-X : ndarray (n_samples, n_features), float64 or object
-y : ndarray (n_samples,) or None
-feature_names : list[str]
-categorical_idx : list[int] – column indices of X holding strings
+X: array (n_samples, n_features), float64 or object
+y: array (n_samples,) or None
+feature_names: list of str
+categorical_idx: list of int, the column indices of X that hold strings
 """
 
 
@@ -39,7 +38,7 @@ def _is_missing(tokens: np.ndarray, missing) -> np.ndarray:
 
 
 def _convert_column(tokens: np.ndarray, missing, force_categorical: bool):
-    """Return (array, is_categorical) for a column of raw string tokens."""
+    """Return (array, is_categorical) for a column of raw string values."""
     miss = _is_missing(tokens, missing)
     if not force_categorical:
         filled = np.where(miss, "nan", tokens)
@@ -102,24 +101,21 @@ def _rows_to_arrays(rows, header, target, missing, categorical):
 def load_csv(path, target: Optional[object] = None, delimiter: str = ",",
              missing_values: Sequence[str] = DEFAULT_MISSING,
              categorical: Optional[Sequence[str]] = None) -> CSVData:
-    """Load an entire CSV file (first line must be a header).
+    """Load a whole CSV file (the first line must be a header).
 
-    Parameters
-    ----------
-    path : str or Path
-    target : str or int, optional
-        Label column (name or index). Excluded from ``X``; returned as ``y``.
-        Integer-valued float labels are cast to ``int64``.
-    delimiter : str
-    missing_values : sequence of str
-        Case-insensitive tokens treated as missing.
-    categorical : sequence of str, optional
-        Column names to force as categorical. Non-numeric columns are
-        detected as categorical automatically.
+    Parameters:
+        path: str or Path.
+        target: optional label column (name or index). It is left out of X
+            and returned as y. Float labels that are whole numbers are
+            turned into int64.
+        delimiter: the character between fields.
+        missing_values: strings that count as missing (upper or lower case
+            does not matter).
+        categorical: optional column names to always treat as categories.
+            Columns that do not hold numbers are treated as categories anyway.
 
-    Returns
-    -------
-    CSVData(X, y, feature_names, categorical_idx)
+    Returns:
+        CSVData(X, y, feature_names, categorical_idx)
     """
     with open(path, newline="") as fh:
         reader = csv.reader(fh, delimiter=delimiter)
@@ -135,15 +131,14 @@ def iter_csv_chunks(path, chunk_size: int, target: Optional[object] = None,
                     delimiter: str = ",",
                     missing_values: Sequence[str] = DEFAULT_MISSING,
                     categorical: Optional[Sequence[str]] = None) -> Iterator[CSVData]:
-    """Stream a CSV file in chunks of ``chunk_size`` rows.
+    """Read a CSV file in chunks of chunk_size rows.
 
-    Only one chunk is held in memory at a time. Pass ``categorical`` so that
-    column types are consistent across chunks (a chunk where a categorical
-    column happens to be all missing would otherwise look numeric).
+    Only one chunk is in memory at a time. Pass categorical so that column
+    types stay the same in every chunk (otherwise a chunk where a category
+    column is all missing would look like a number column).
 
-    Yields
-    ------
-    CSVData for each chunk (the last chunk may be smaller).
+    Yields:
+        CSVData for each chunk (the last chunk may be smaller).
     """
     if not isinstance(chunk_size, (int, np.integer)) or chunk_size <= 0:
         raise ValueError(f"chunk_size must be a positive integer, got {chunk_size!r}")
@@ -162,9 +157,9 @@ def iter_csv_chunks(path, chunk_size: int, target: Optional[object] = None,
 
 
 def iter_array_chunks(X, y=None, chunk_size: int = 100):
-    """Split in-memory arrays into consecutive chunks along ``axis=0``.
+    """Split arrays that are already in memory into chunks of rows, in order.
 
-    Yields ``(X_chunk, y_chunk)`` (``y_chunk`` is None if ``y`` is None).
+    Yields (X_chunk, y_chunk). y_chunk is None if y is None.
     """
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
@@ -178,9 +173,9 @@ def iter_array_chunks(X, y=None, chunk_size: int = 100):
 
 def save_csv(path, X, header: Sequence[str], y=None, target_name: str = "target",
              delimiter: str = ",") -> None:
-    """Write ``X`` (and optionally ``y`` as the last column) to CSV.
+    """Write X (and y as the last column, if given) to a CSV file.
 
-    NaN / None are written as empty fields.
+    NaN and None are written as empty fields.
     """
     X = np.asarray(X, dtype=object)
     if X.ndim != 2 or X.shape[1] != len(header):

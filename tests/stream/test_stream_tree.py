@@ -54,8 +54,8 @@ def test_ties_never_split_equal_values_and_are_deterministic():
     X = np.array([[1.0], [1.0], [1.0], [2.0], [2.0]])
     y = np.array([0, 1, 0, 1, 1])
     f, thr, _, _ = best_split(X, y, 2)
-    assert 1.0 <= thr < 2.0   # threshold strictly between distinct values
-    # identical duplicate features -> lowest index wins
+    assert 1.0 <= thr < 2.0   # threshold sits between two different values
+    # two identical features -> the lower index wins
     X2 = np.hstack([X, X])
     assert best_split(X2, y, 2)[0] == 0
     # leaf class tie -> smallest label
@@ -163,7 +163,7 @@ def test_new_class_in_stream_and_classes_argument(rng):
     assert t.predict_proba(np.zeros((1, 2))).shape == (1, 2)
     t.partial_fit(rng.normal(size=(5, 2)), np.full(5, 2))        # new class, buffered
     p = t.predict_proba(np.zeros((1, 2)))
-    assert p.shape == (1, 3) and p[0, 2] == 0.0                  # unseen by current tree
+    assert p.shape == (1, 3) and p[0, 2] == 0.0                  # the current tree has not seen it
 
 
 def test_single_class_chunk_and_growing_features(rng):

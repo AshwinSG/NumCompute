@@ -1,12 +1,12 @@
-"""Generate ``sensor_stream.csv`` – a synthetic machine-fault stream.
+"""Make sensor_stream.csv, a made-up stream of machine fault data.
 
-* 6 000 rows, 5 numeric sensor readings + 1 categorical ``machine_type``
-* ~3 % missing values in the numeric columns
-* a new category (``"D"``) only appears after row 3 000 (exercises the
-  incremental one-hot encoder)
-* **concept drift** at row 3 500: the fault rule changes, so a model must
-  retrain to recover (exercises ``buffer_size`` trade-offs)
-* binary label ``fault`` (0/1)
+    6000 rows: 5 sensor readings (numbers) and 1 category column, machine_type
+    about 3% missing values in the number columns
+    a new category ("D") only shows up after row 3000 (this tests that the
+    one-hot encoder can add categories as it goes)
+    drift at row 3500: the rule for faults changes, so a model must retrain
+    to catch up (this tests the buffer_size trade-off)
+    label column fault (0 or 1)
 
 Run:  python data/make_dataset.py
 """
@@ -32,9 +32,9 @@ mtype[late & (rng.random(N) < 0.25)] = "D"
 
 type_risk = np.select([mtype == "A", mtype == "B", mtype == "C", mtype == "D"],
                       [0.0, 0.8, -0.5, 1.5])
-# regime 1: heat + vibration cause faults
+# before the drift: high temperature and vibration cause faults
 logit1 = 0.25 * (temp - 75) + 0.9 * (vibration - 3.5) + type_risk
-# regime 2 (after drift): pressure + humidity cause faults, temperature reversed
+# after the drift: pressure and humidity cause faults, and temperature works the other way
 logit2 = 0.45 * (pressure - 31) + 0.08 * (humidity - 55) - 0.12 * (temp - 70) + type_risk
 logit = np.where(np.arange(N) < DRIFT_AT, logit1, logit2)
 fault = (rng.random(N) < 1 / (1 + np.exp(-2.0 * logit))).astype(int)

@@ -1,20 +1,18 @@
-"""Streaming (chunk-based) statistics.
+"""Running statistics that are updated one chunk at a time.
 
-All classes share the same API:
+All classes have the same methods:
+    update_stats(X_chunk) adds a new chunk of shape (n_samples, n_features)
+    to the running totals (update is another name for it).
+    reset() forgets everything.
 
-* ``update_stats(X_chunk)`` – fold a new chunk of shape
-  ``(n_samples, n_features)`` into the running state (alias: ``update``).
-* ``reset()`` – forget everything.
+Statistics are always worked out for each feature, along axis=0.
+NaNs are skipped (each feature keeps its own count of non-missing values).
 
-Statistics are always per-feature, i.e. computed along ``axis=0``.
-NaNs are ignored (each feature keeps its own non-missing count).
-
-Classes
--------
-StreamingStats      count / mean / variance / min / max (Chan et al. merge)
-StreamingQuantile   quantiles via reservoir sampling (exact until capacity)
-StreamingHistogram  fixed-edge histograms, optional sliding window over chunks
-StreamingSummary    convenience bundle of the three above
+Classes:
+    StreamingStats      count, mean, variance, min and max (Chan et al. merge)
+    StreamingQuantile   quantiles from a random sample (exact until the sample is full)
+    StreamingHistogram  histograms with fixed bins, can count only the last few chunks
+    StreamingSummary    the three above, updated together
 """
 from __future__ import annotations
 
@@ -27,13 +25,13 @@ from .utils import NotFittedError, check_array
 
 
 # --------------------------------------------------------------------------- #
-# Moment merging
+# Merging counts, means and variances
 # --------------------------------------------------------------------------- #
 def chunk_moments(X: np.ndarray):
-    """NaN-aware per-feature (count, mean, M2) of a 2-D chunk.
+    """Count, mean and M2 for each feature of a 2-D chunk, skipping NaNs.
 
-    ``M2`` is the sum of squared deviations from the chunk mean. Columns with
-    no observed values get ``count=0, mean=0, M2=0``.
+    M2 is the sum of squared distances from the chunk mean. Columns with no
+    values get count=0, mean=0, M2=0.
     """
     mask = ~np.isnan(X)
     n = mask.sum(axis=0).astype(float)
@@ -45,11 +43,12 @@ def chunk_moments(X: np.ndarray):
 
 
 def combine_moments(n_a, mean_a, M2_a, n_b, mean_b, M2_b):
-    """Merge two sets of (count, mean, M2) – Chan, Golub & LeVeque (1979).
+    """Merge two sets of (count, mean, M2), using the method of Chan, Golub
+    and LeVeque (1979).
 
-    Numerically stable: works with deviations rather than raw power sums, so
-    there is no catastrophic cancellation for data with a large offset.
-    Fully vectorised over features; handles zero counts on either side.
+    It works with distances from the mean instead of raw sums of squares, so
+    it stays accurate even when all the values are very large. It handles all
+    features at once and copes with a count of zero on either side.
     """
     n = n_a + n_b
     safe_n = np.where(n > 0, n, 1.0)
@@ -60,10 +59,11 @@ def combine_moments(n_a, mean_a, M2_a, n_b, mean_b, M2_b):
 
 
 def welford_loop(X) -> tuple:
-    """Reference **loop-based** Welford update (one sample at a time).
+    """Slow loop version of the Welford update (one sample at a time).
 
-    Used for benchmarking against the vectorised :class:`StreamingStats`.
-    Returns ``(count, mean, var)`` per feature (population variance).
+    Used in the speed tests to compare against StreamingStats, which uses
+    NumPy array operations. Returns (count, mean, var) for each feature
+    (variance divided by n, not n - 1).
     """
     X = check_array(X)
     n = np.zeros(X.shape[1])
@@ -83,22 +83,20 @@ def welford_loop(X) -> tuple:
 
 
 class StreamingStats:
-    """Running per-feature count, mean, variance, min and max.
+    """Running count, mean, variance, min and max for each feature.
 
-    Parameters
-    ----------
-    growth_fill : float or None, default None
-        If not None, chunks with *more* columns than seen so far are accepted
-        (e.g. after a :class:`OneHotEncoder` discovers a new category). New
-        columns are initialised as if every previously seen row held
-        ``growth_fill`` – exact for one-hot columns with ``growth_fill=0``.
-        If None, a width change raises ``ValueError``.
+    Parameters:
+        growth_fill: float or None, default None. If not None, chunks with
+            more columns than seen so far are accepted (for example after a
+            OneHotEncoder finds a new category). The new columns are set up
+            as if every earlier row held growth_fill. This is exact for
+            one-hot columns with growth_fill=0. If None, a change in the
+            number of columns raises ValueError.
 
-    Attributes
-    ----------
-    n_ : ndarray (n_features,)  non-missing count per feature
-    n_rows_ : int               total rows seen
-    mean_, M2_, min_, max_ : ndarray (n_features,)
+    Attributes:
+        n_: array (n_features,), count of non-missing values per feature
+        n_rows_: int, total rows seen
+        mean_, M2_, min_, max_: arrays (n_features,)
     """
 
     def __init__(self, growth_fill: Optional[float] = None):
@@ -129,7 +127,7 @@ class StreamingStats:
         self.max_ = np.concatenate([self.max_, np.full(extra, -mm)])
 
     def update_stats(self, X_chunk):
-        """Fold ``X_chunk`` (n_samples, n_features) into the running state."""
+        """Add X_chunk (n_samples, n_features) to the running totals."""
         X = check_array(X_chunk, "X_chunk")
         width = X.shape[1]
         if self.n_ is None:
@@ -157,7 +155,7 @@ class StreamingStats:
     update = update_stats
 
     def merge(self, other: "StreamingStats") -> "StreamingStats":
-        """Combine with another accumulator (e.g. from a parallel worker)."""
+        """Combine with another StreamingStats (for example one filled by a parallel worker)."""
         if other.n_ is None:
             return self
         if self.n_ is None:
@@ -185,15 +183,15 @@ class StreamingStats:
 
     @property
     def mean(self) -> np.ndarray:
-        """Per-feature mean; NaN for features with no observed values."""
+        """Mean of each feature. NaN for features with no values yet."""
         self._check()
         return np.where(self.n_ > 0, self.mean_, np.nan)
 
     def var(self, ddof: int = 0) -> np.ndarray:
-        """Per-feature variance with ``ddof`` delta degrees of freedom.
+        """Variance of each feature, dividing by count - ddof.
 
-        Returns NaN where ``count - ddof <= 0``. Tiny negative values caused by
-        round-off are clipped to 0.
+        Returns NaN where count - ddof <= 0. Tiny negative values caused by
+        rounding are set to 0.
         """
         self._check()
         denom = self.n_ - ddof
@@ -215,17 +213,16 @@ class StreamingStats:
 
 
 class StreamingQuantile:
-    """Approximate per-feature quantiles via reservoir sampling (Algorithm R).
+    """Rough quantiles for each feature, taken from a random sample of rows.
 
-    The reservoir keeps a uniform random sample of at most ``capacity`` rows,
-    so quantiles are *exact* while fewer than ``capacity`` rows have been
-    seen, and an unbiased approximation afterwards. Memory is
-    ``O(capacity * n_features)`` regardless of stream length.
+    The sample (called a reservoir) keeps a fair random pick of at most
+    capacity rows, so quantiles are exact while fewer than capacity rows have
+    been seen, and a fair estimate after that. Memory stays at
+    capacity * n_features values no matter how long the stream is.
 
-    Parameters
-    ----------
-    capacity : int, default 10_000
-    random_state : int or None
+    Parameters:
+        capacity: int, default 10_000
+        random_state: int or None
     """
 
     def __init__(self, capacity: int = 10_000, random_state: Optional[int] = None):
@@ -249,7 +246,7 @@ class StreamingQuantile:
         elif X.shape[1] != self.reservoir_.shape[1]:
             raise ValueError(f"X_chunk has {X.shape[1]} features, expected "
                              f"{self.reservoir_.shape[1]}")
-        # 1) fill free slots directly
+        # 1) put rows straight into empty slots
         free = self.capacity - self._filled
         k = min(free, X.shape[0])
         if k:
@@ -257,13 +254,14 @@ class StreamingQuantile:
             self._filled += k
         rest = X[k:]
         if rest.shape[0]:
-            # 2) Algorithm R, vectorised: item with global index i (1-based)
-            #    replaces slot j ~ U{0..i-1} if j < capacity.
+            # 2) reservoir sampling for the whole chunk at once: the row at
+            #    overall position i (counting from 1) picks a random slot j
+            #    from 0 to i-1, and replaces it if j < capacity.
             idx = self.n_seen_ + k + np.arange(1, rest.shape[0] + 1)
             j = (self._rng.random(rest.shape[0]) * idx).astype(np.int64)
             keep = j < self.capacity
-            # sequential semantics: later rows overwrite earlier ones on
-            # duplicate slots, which NumPy fancy assignment reproduces.
+            # if two rows pick the same slot, the later row wins, the same as
+            # going one row at a time. NumPy index assignment does this for us.
             self.reservoir_[j[keep]] = rest[keep]
         self.n_seen_ += X.shape[0]
         return self
@@ -271,8 +269,8 @@ class StreamingQuantile:
     update = update_stats
 
     def quantile(self, q) -> np.ndarray:
-        """Quantile(s) ``q`` in [0, 1]. Returns shape (n_features,) for scalar
-        ``q`` or (len(q), n_features) for a sequence. NaN-aware."""
+        """Quantile(s) q between 0 and 1. Returns shape (n_features,) for a
+        single q, or (len(q), n_features) for a list. NaNs are skipped."""
         if self.reservoir_ is None:
             raise NotFittedError("StreamingQuantile has not seen any data")
         q_arr = np.asarray(q, dtype=float)
@@ -280,7 +278,7 @@ class StreamingQuantile:
             raise ValueError(f"quantiles must lie in [0, 1], got {q}")
         sample = self.reservoir_[:self._filled]
         all_nan = np.isnan(sample).all(axis=0)
-        filled = np.where(all_nan, 0.0, sample)  # avoid all-NaN warnings
+        filled = np.where(all_nan, 0.0, sample)  # avoid warnings for all-NaN columns
         out = np.nanquantile(filled, q_arr, axis=0)
         return np.where(all_nan, np.nan, out)
 
@@ -289,24 +287,21 @@ class StreamingQuantile:
 
 
 class StreamingHistogram:
-    """Per-feature histograms with fixed, equal-width bins.
+    """Histograms for each feature, with fixed bins of equal width.
 
-    Parameters
-    ----------
-    bins : int, default 20
-    range : (float, float) or None
-        Bin range shared by all features. If None, a per-feature range is set
-        from the first chunk (zero-variance features get a unit-width range
-        around their value). Values outside the range are clipped into the
-        first/last bin and counted in ``n_underflow_`` / ``n_overflow_``.
-    window : int or None
-        If given, only the most recent ``window`` chunks contribute
-        (sliding-window histogram).
+    Parameters:
+        bins: int, default 20
+        range: (float, float) or None. Bin range used for all features. If
+            None, each feature gets its own range from the first chunk (a
+            feature with only one value gets a range of width 1 around it).
+            Values outside the range are put in the first or last bin and
+            counted in n_underflow_ and n_overflow_.
+        window: int or None. If set, only the last window chunks are
+            counted.
 
-    Attributes
-    ----------
-    edges_ : ndarray (n_features, bins + 1)
-    counts : ndarray (n_features, bins)   (property)
+    Attributes:
+        edges_: array (n_features, bins + 1)
+        counts: array (n_features, bins) (a property)
     """
 
     def __init__(self, bins: int = 20, range: Optional[tuple] = None,
@@ -383,14 +378,14 @@ class StreamingHistogram:
         return self._total.copy()
 
     def density(self) -> np.ndarray:
-        """Normalised histogram (integrates to 1 per feature; 0 if empty)."""
+        """Histogram scaled so its area is 1 for each feature (all 0 if empty)."""
         c = self.counts.astype(float)
         widths = np.diff(self.edges_, axis=1)
         tot = c.sum(axis=1, keepdims=True)
         return np.where(tot > 0, c / np.where(tot > 0, tot, 1) / widths, 0.0)
 
     def quantile(self, q) -> np.ndarray:
-        """Approximate quantile by linear interpolation inside bins."""
+        """Rough quantile, found by drawing a straight line inside the bin."""
         q = float(q)
         if not 0 <= q <= 1:
             raise ValueError(f"q must lie in [0, 1], got {q}")
@@ -408,15 +403,14 @@ class StreamingHistogram:
 
 
 class StreamingSummary:
-    """Bundle of :class:`StreamingStats`, :class:`StreamingQuantile` and
-    :class:`StreamingHistogram` behind a single ``update_stats`` call.
+    """StreamingStats, StreamingQuantile and StreamingHistogram, all updated
+    by one update_stats call.
 
-    Example
-    -------
-    >>> s = StreamingSummary(quantiles=(0.25, 0.5, 0.75))
-    >>> for chunk in chunks:
-    ...     s.update_stats(chunk)
-    >>> s.result()["mean"]
+    Example:
+        s = StreamingSummary(quantiles=(0.25, 0.5, 0.75))
+        for chunk in chunks:
+            s.update_stats(chunk)
+        s.result()["mean"]
     """
 
     def __init__(self, quantiles: Sequence[float] = (0.25, 0.5, 0.75),

@@ -1,25 +1,21 @@
-"""Classification metrics – one-shot functions and streaming accumulators.
+"""Classification metrics: plain functions and running (streaming) versions.
 
-Functional API (whole arrays)
------------------------------
-``accuracy_score``, ``precision_score``, ``recall_score``, ``f1_score``,
-``confusion_matrix``, ``roc_auc_score``.
+Functions that take whole arrays:
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, roc_auc_score.
 
-Streaming API
--------------
-Every streaming metric implements::
-
+Streaming metrics all have these methods:
     m.update(y_true_chunk, y_pred_chunk)   # or y_score_chunk for AUC
     m.result()                             # current value
     m.reset()
 
-Pass ``window=k`` to compute the metric over only the most recent ``k``
-chunks (rolling-window metric); ``window=None`` accumulates over the whole
-stream. Labels may be any hashable dtype (ints or strings) and new labels may
-appear at any time – the confusion matrix grows on demand.
+Pass window=k to work out the metric over only the last k chunks.
+window=None counts the whole stream. Labels can be ints or strings, and new
+labels can appear at any time. The confusion matrix grows when needed.
 
-Ill-defined ratios (e.g. precision of a class that was never predicted) are
-returned as 0.0 (``zero_division=0``) rather than NaN or a warning.
+Ratios that cannot be worked out (for example precision of a class that was
+never predicted) are returned as 0.0 (zero_division=0) instead of NaN or a
+warning.
 """
 from __future__ import annotations
 
@@ -34,17 +30,16 @@ _AVERAGES = ("macro", "micro", "weighted", "binary", None)
 
 
 # --------------------------------------------------------------------------- #
-# Confusion-matrix based helpers
+# Helpers based on the confusion matrix
 # --------------------------------------------------------------------------- #
 def confusion_matrix(y_true, y_pred, labels=None) -> np.ndarray:
-    """Vectorised confusion matrix.
+    """Confusion matrix built with NumPy array operations (no Python loop).
 
-    Returns
-    -------
-    cm : ndarray (n_labels, n_labels), ``cm[i, j]`` = number of samples with
-        true label ``labels[i]`` predicted as ``labels[j]``. Labels default to
-        the sorted union of both arrays. Samples whose label is not in
-        ``labels`` are ignored.
+    Returns:
+        cm: array (n_labels, n_labels). cm[i, j] is the number of samples
+        with true label labels[i] that were predicted as labels[j]. By
+        default labels are all values from both arrays, sorted. Samples
+        whose label is not in labels are skipped.
     """
     y_true, y_pred = check_same_length(y_true, y_pred)
     if labels is None:
@@ -67,7 +62,7 @@ def confusion_matrix(y_true, y_pred, labels=None) -> np.ndarray:
 
 
 def confusion_matrix_loop(y_true, y_pred, labels=None) -> np.ndarray:
-    """Reference loop-based confusion matrix (for benchmarking only)."""
+    """Slow loop version of confusion_matrix (only used in the speed tests)."""
     y_true, y_pred = check_same_length(y_true, y_pred)
     if labels is None:
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
@@ -111,7 +106,7 @@ def _prf_from_cm(cm, labels, kind, average, pos_label):
     if average == "binary":
         labels = list(np.asarray(labels).tolist())
         if pos_label not in labels:
-            # positive class never seen: precision/recall are 0 by convention
+            # positive class never seen: precision and recall are taken as 0
             return 0.0
         return float(per_class[labels.index(pos_label)])
     if average == "weighted":
@@ -121,7 +116,7 @@ def _prf_from_cm(cm, labels, kind, average, pos_label):
 
 
 def accuracy_score(y_true, y_pred) -> float:
-    """Fraction of exact matches. Empty input returns 0.0."""
+    """Share of predictions that match exactly. Empty input returns 0.0."""
     y_true, y_pred = check_same_length(y_true, y_pred)
     if y_true.size == 0:
         return 0.0
@@ -171,9 +166,9 @@ def _score_1d(y_score):
 
 
 def roc_auc_score(y_true, y_score, pos_label=None) -> float:
-    """Exact binary ROC AUC via the Mann-Whitney U statistic.
+    """Exact ROC AUC for two classes, worked out from ranks (Mann-Whitney U).
 
-    Tied scores receive average ranks, so a tie between a positive and a
+    Equal scores get the average rank, so a tie between a positive and a
     negative counts as 1/2. Returns NaN if only one class is present.
     """
     s = _score_1d(y_score)
@@ -187,7 +182,7 @@ def roc_auc_score(y_true, y_score, pos_label=None) -> float:
     s_sorted = s[order]
     # average ranks for ties
     _, first, counts = np.unique(s_sorted, return_index=True, return_counts=True)
-    avg_rank = first + (counts + 1) / 2.0          # 1-based average rank
+    avg_rank = first + (counts + 1) / 2.0          # average rank, counting from 1
     ranks = np.empty_like(s)
     ranks[order] = np.repeat(avg_rank, counts)
     u = ranks[pos].sum() - n_pos * (n_pos + 1) / 2.0
@@ -198,11 +193,10 @@ def roc_auc_score(y_true, y_score, pos_label=None) -> float:
 # Streaming metrics
 # --------------------------------------------------------------------------- #
 class StreamingMetric:
-    """Base class: ``update`` / ``result`` / ``reset``.
+    """Base class with update, result and reset.
 
-    ``requires_score`` tells drivers such as :class:`StreamTrainer` whether
-    ``update`` expects class predictions (False) or positive-class scores
-    (True).
+    requires_score tells callers such as StreamTrainer whether update expects
+    predicted classes (False) or scores for the positive class (True).
     """
 
     requires_score = False
@@ -221,11 +215,11 @@ class StreamingMetric:
 
 
 class StreamingConfusionMatrix(StreamingMetric):
-    """Confusion matrix accumulated over a stream (optionally windowed).
+    """Confusion matrix added up over a stream (can be limited to the last few chunks).
 
-    Attributes
-    ----------
-    labels : ndarray – sorted labels matching the rows/columns of ``result()``
+    Attributes:
+        labels: array of sorted labels, in the same order as the rows and
+            columns of result()
     """
 
     def __init__(self, window: Optional[int] = None):
@@ -235,7 +229,7 @@ class StreamingConfusionMatrix(StreamingMetric):
         self.reset()
 
     def reset(self):
-        self._labels = []           # insertion order
+        self._labels = []           # in the order they were first seen
         self._index = {}
         self._total = np.zeros((0, 0), dtype=np.int64)
         self._chunks = deque(maxlen=self.window) if self.window else None
@@ -293,7 +287,7 @@ class _CMMetric(StreamingMetric):
 
 
 class StreamingAccuracy(_CMMetric):
-    """Running (or rolling-window) accuracy. 0.0 before any update."""
+    """Running accuracy (or accuracy over the last few chunks). 0.0 before any update."""
 
     def result(self) -> float:
         m = self.cm.result()
@@ -302,7 +296,7 @@ class StreamingAccuracy(_CMMetric):
 
 
 class StreamingErrorRate(StreamingAccuracy):
-    """``1 - accuracy`` (0.0 before any update)."""
+    """1 - accuracy (0.0 before any update)."""
 
     def result(self) -> float:
         return 0.0 if self.cm.result().sum() == 0 else 1.0 - super().result()
@@ -324,29 +318,29 @@ class _PRF(_CMMetric):
 
 
 class StreamingPrecision(_PRF):
-    """Streaming precision (``average`` in macro/micro/weighted/binary/None)."""
+    """Running precision (average can be macro, micro, weighted, binary or None)."""
     kind = "precision"
 
 
 class StreamingRecall(_PRF):
-    """Streaming recall (``average`` in macro/micro/weighted/binary/None)."""
+    """Running recall (average can be macro, micro, weighted, binary or None)."""
     kind = "recall"
 
 
 class StreamingF1(_PRF):
-    """Streaming F1 (``average`` in macro/micro/weighted/binary/None)."""
+    """Running F1 (average can be macro, micro, weighted, binary or None)."""
     kind = "f1"
 
 
 class StreamingAUC(StreamingMetric):
-    """Binary ROC AUC accumulated over a stream with bounded memory.
+    """ROC AUC for two classes, added up over a stream using a fixed amount of memory.
 
-    Scores (expected in ``[0, 1]``, e.g. ``predict_proba[:, 1]``) are binned
-    into ``n_bins`` equal-width bins per class. Pairs falling in the same bin
-    count as ties (1/2), so the estimate is within ``O(1/n_bins)`` of the
-    exact AUC while memory stays ``O(n_bins)``.
+    Scores (expected between 0 and 1, for example predict_proba[:, 1]) are
+    put into n_bins bins of equal width for each class. Pairs that land in
+    the same bin count as ties (1/2), so the result is within about
+    1/n_bins of the exact AUC, while memory stays at n_bins counts.
 
-    ``update(y_true_chunk, y_score_chunk)``; ``result()`` is NaN until both
+    Call update(y_true_chunk, y_score_chunk). result() is NaN until both
     classes have been seen.
     """
 

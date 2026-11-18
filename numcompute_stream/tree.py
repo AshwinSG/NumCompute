@@ -1,29 +1,32 @@
-"""CART decision tree classifier with buffered retraining for streams.
+"""Decision tree classifier (CART) that retrains from a buffer when data
+arrives in chunks.
 
-Algorithm
----------
-* Binary splits ``x[f] <= threshold`` chosen greedily by impurity decrease
-  (Gini or entropy).
-* **Vectorised split search**: for a node, all candidate features are sorted
-  at once (``argsort(axis=0)``), class counts to the left of every candidate
-  threshold come from a single ``cumsum`` over a one-hot label tensor, and the
-  impurity of every (threshold, feature) pair is evaluated in one shot. Only
-  the loop over *nodes* is in Python (an explicit stack, no recursion).
-* **Missing values**: NaNs are ignored when scoring a split; the gain is
-  scaled by the fraction of non-missing rows (C4.5 style) and missing rows are
-  routed to the larger child (``nan_left_``), both at fit and predict time.
-* **Ties**: thresholds are only placed *between distinct values*; among
-  equally good splits the lowest feature index, then the lowest threshold,
-  wins; among equally likely classes the smallest label wins. Results are
-  therefore deterministic for a fixed ``random_state``.
+How it works:
+    Each split is a yes/no test, x[f] <= threshold. At each node the split
+    that lowers the impurity the most is picked (Gini or entropy).
 
-Streaming
----------
-``partial_fit`` appends each chunk to an internal buffer. Once the buffer
-holds at least ``buffer_size`` samples the tree is **retrained from scratch
-on the buffered data** and the buffer is cleared. Between retrains,
-``predict`` uses the most recently trained tree. ``flush()`` forces a retrain
-on whatever is buffered (e.g. at the end of a stream).
+    Fast split search: for a node, all candidate features are sorted at once
+    (argsort(axis=0)). The class counts to the left of every possible
+    threshold come from one cumsum over the one-hot labels, and the impurity
+    of every (threshold, feature) pair is worked out in one go. Only the loop
+    over nodes is in Python (it uses a stack, not recursion).
+
+    Missing values: NaNs are skipped when scoring a split. The gain is
+    scaled down by the share of rows that are not missing (as in C4.5), and
+    missing rows are sent to the bigger child (nan_left_), both in training
+    and in prediction.
+
+    Ties: thresholds are only placed between two different values. If two
+    splits are equally good, the lower feature index wins, then the lower
+    threshold. If two classes are equally likely, the smaller label wins. So
+    results are always the same for a fixed random_state.
+
+Streaming:
+    partial_fit adds each chunk to a buffer. Once the buffer holds at least
+    buffer_size samples, a new tree is trained from scratch on the buffered
+    data and the buffer is emptied. Between retrains, predict uses the last
+    trained tree. flush() forces a retrain on whatever is in the buffer (for
+    example at the end of a stream).
 """
 from __future__ import annotations
 
@@ -35,23 +38,21 @@ import numpy as np
 from .utils import NotFittedError, check_array, check_X_y
 
 _LEAF = -1
-_SPLIT_BLOCK_ELEMS = 4_000_000  # cap on n * features * classes per block
+_SPLIT_BLOCK_ELEMS = 4_000_000  # most n * features * classes handled in one block
 
 
 # --------------------------------------------------------------------------- #
 # Impurity
 # --------------------------------------------------------------------------- #
 def impurity(counts: np.ndarray, criterion: str = "gini") -> np.ndarray:
-    """Impurity of class-count vectors along the last axis.
+    """Impurity of class counts, along the last axis.
 
-    Parameters
-    ----------
-    counts : ndarray (..., n_classes)
-    criterion : {"gini", "entropy"}
+    Parameters:
+        counts: array (..., n_classes)
+        criterion: "gini" or "entropy"
 
-    Returns
-    -------
-    ndarray (...) – 0 for empty nodes.
+    Returns:
+        array (...), 0 for empty nodes.
     """
     counts = np.asarray(counts, dtype=float)
     tot = counts.sum(axis=-1, keepdims=True)
@@ -67,7 +68,7 @@ def impurity(counts: np.ndarray, criterion: str = "gini") -> np.ndarray:
 
 
 def _midpoint(a, b):
-    """Overflow-safe midpoint that is guaranteed to satisfy a <= m < b."""
+    """Midpoint of a and b that cannot overflow and always gives a <= m < b."""
     m = a + (b - a) / 2.0
     return np.where(m < b, m, a)
 
@@ -76,17 +77,15 @@ def _midpoint(a, b):
 # Split search
 # --------------------------------------------------------------------------- #
 def best_split(X, y, n_classes, criterion="gini", min_samples_leaf=1, features=None):
-    """Vectorised search for the best binary split.
+    """Find the best yes/no split using NumPy array operations.
 
-    Parameters
-    ----------
-    X : ndarray (n_samples, n_features), may contain NaN
-    y : ndarray (n_samples,) of int class codes in ``[0, n_classes)``
-    features : ndarray of candidate feature indices (default: all)
+    Parameters:
+        X: array (n_samples, n_features), may contain NaN
+        y: array (n_samples,) of int class codes from 0 to n_classes - 1
+        features: array of feature indices to try (default: all)
 
-    Returns
-    -------
-    (feature, threshold, gain, nan_left) or None if no valid split exists.
+    Returns:
+        (feature, threshold, gain, nan_left), or None if no valid split exists.
     """
     n = X.shape[0]
     features = np.arange(X.shape[1]) if features is None else np.asarray(features)
@@ -118,7 +117,7 @@ def best_split(X, y, n_classes, criterion="gini", min_samples_leaf=1, features=N
         child = (nl * impurity(left, criterion) + nr * impurity(right, criterion)) / safe_nv
         gain = (n_valid / n) * (impurity(total, criterion)[None, :] - child)
         gain = np.where(ok, gain, -np.inf)
-        # transpose so ties resolve to lowest feature, then lowest threshold
+        # transpose so that on a tie the lowest feature wins, then the lowest threshold
         flat = int(np.argmax(gain.T))
         fi, pos = divmod(flat, n - 1)
         g = gain[pos, fi]
@@ -130,8 +129,8 @@ def best_split(X, y, n_classes, criterion="gini", min_samples_leaf=1, features=N
 
 
 def best_split_loop(X, y, n_classes, criterion="gini", min_samples_leaf=1, features=None):
-    """Reference **loop-based** split search with identical semantics to
-    :func:`best_split` (used for benchmarking and correctness tests)."""
+    """Slow loop version of best_split that gives the same results (used in
+    the speed tests and to check that best_split is correct)."""
     n = X.shape[0]
     features = range(X.shape[1]) if features is None else features
     best_gain, best = -np.inf, None
@@ -163,45 +162,44 @@ def best_split_loop(X, y, n_classes, criterion="gini", min_samples_leaf=1, featu
 
 
 # --------------------------------------------------------------------------- #
-# Estimator
+# Model
 # --------------------------------------------------------------------------- #
 class DecisionTreeClassifier:
-    """Depth-limited CART classifier supporting streaming via buffered retraining.
+    """CART classifier with a depth limit that learns from chunks by
+    retraining from a buffer.
 
-    Parameters
-    ----------
-    max_depth : int or None
-        Maximum depth (root has depth 0). None = grow until pure/min sizes.
-    min_samples_split : int, default 2
-        Minimum samples in a node to consider splitting it.
-    min_samples_leaf : int, default 1
-        Minimum (non-missing) samples on each side of a split.
-    max_features : None, int, float, "sqrt" or "log2"
-        Number of features sampled (without replacement) at each node.
-    criterion : {"gini", "entropy"}
-    buffer_size : int or None, default None
-        Streaming buffer size. ``partial_fit`` retrains once the buffer holds
-        ``>= buffer_size`` samples; None retrains on every ``partial_fit``.
-    min_impurity_decrease : float, default 0.0
-        A split must improve impurity by more than this.
-    pad_value : float, default 0.0
-        If a chunk arrives with more (trailing) features than the buffered
-        chunks – e.g. after a one-hot encoder discovered a new category – the
-        buffered rows are padded with this value.
-    random_state : int or None
+    Parameters:
+        max_depth: int or None. Largest depth allowed (the root has depth 0).
+            None means keep growing until nodes are pure or too small.
+        min_samples_split: int, default 2. A node needs at least this many
+            samples before it can be split.
+        min_samples_leaf: int, default 1. Each side of a split needs at least
+            this many (non-missing) samples.
+        max_features: None, int, float, "sqrt" or "log2". How many features
+            are picked at random (no repeats) to try at each node.
+        criterion: "gini" or "entropy"
+        buffer_size: int or None, default None. Size of the buffer.
+            partial_fit retrains once the buffer holds buffer_size samples or
+            more. None retrains on every partial_fit.
+        min_impurity_decrease: float, default 0.0. A split must lower the
+            impurity by more than this.
+        pad_value: float, default 0.0. If a chunk arrives with more columns
+            at the end than the buffered chunks (for example after a one-hot
+            encoder found a new category), the buffered rows are padded with
+            this value.
+        random_state: int or None
 
-    Attributes
-    ----------
-    classes_ : ndarray – sorted labels seen so far (grows while streaming)
-    n_features_in_ : int – width of the data the current tree was trained on
-    n_retrains_ : int, retrain_times_ : list[float] (seconds)
-    feature_, threshold_, left_, right_, nan_left_, value_ : node arrays
+    Attributes:
+        classes_: array of sorted labels seen so far (grows as data arrives)
+        n_features_in_: int, number of columns the current tree was trained on
+        n_retrains_: int, and retrain_times_: list of float (seconds)
+        feature_, threshold_, left_, right_, nan_left_, value_: arrays with
+            one entry per node
 
-    Shapes
-    ------
-    fit / partial_fit : X (n_samples, n_features), y (n_samples,)
-    predict : X (n_samples, >= n_features_in_) -> (n_samples,)
-    predict_proba : -> (n_samples, len(classes_))
+    Shapes:
+        fit and partial_fit: X (n_samples, n_features), y (n_samples,)
+        predict: X (n_samples, at least n_features_in_) gives (n_samples,)
+        predict_proba: gives (n_samples, len(classes_))
     """
 
     def __init__(self, max_depth: Optional[int] = None, min_samples_split: int = 2,
@@ -285,7 +283,8 @@ class DecisionTreeClassifier:
         return int(np.clip(k, 1, n_features))
 
     def fit(self, X, y):
-        """Train a tree from scratch on ``(X, y)`` (clears buffer and classes)."""
+        """Train a new tree from scratch on (X, y). This also empties the
+        buffer and forgets the classes."""
         X, y = check_X_y(X, y)
         self.reset()
         self._update_classes(y)
@@ -294,19 +293,17 @@ class DecisionTreeClassifier:
         return self
 
     def partial_fit(self, X_chunk, y_chunk, classes=None):
-        """Buffer a chunk; retrain when the buffer reaches ``buffer_size``.
+        """Add a chunk to the buffer, and retrain once the buffer reaches buffer_size.
 
-        Parameters
-        ----------
-        X_chunk : (n_samples, n_features)
-        y_chunk : (n_samples,)
-        classes : array-like, optional
-            Full set of labels if known up-front, so ``predict_proba`` has a
-            stable width from the first retrain.
+        Parameters:
+            X_chunk: (n_samples, n_features)
+            y_chunk: (n_samples,)
+            classes: optional list of all labels, if known at the start, so
+                predict_proba has the same number of columns from the first
+                retrain.
 
-        Returns
-        -------
-        self
+        Returns:
+            self
         """
         X, y = check_X_y(X_chunk, y_chunk)
         self._update_classes(y, classes)
@@ -330,7 +327,7 @@ class DecisionTreeClassifier:
         return self
 
     def flush(self):
-        """Retrain on the buffered samples now (no-op if the buffer is empty)."""
+        """Retrain on the buffered samples now (does nothing if the buffer is empty)."""
         if self._buf_n:
             self._retrain_from_buffer()
         return self
@@ -401,7 +398,7 @@ class DecisionTreeClassifier:
         self.n_node_samples_ = np.array(nsamp, dtype=np.int64)
         self.depth_ = max_depth_seen
 
-    # ------------------------------------------------------------- inference
+    # ------------------------------------------------------------ prediction
     def _check_predict_X(self, X):
         if not self.is_fitted:
             extra = ""
@@ -418,7 +415,7 @@ class DecisionTreeClassifier:
     def apply(self, X) -> np.ndarray:
         """Leaf index for each sample, shape (n_samples,).
 
-        Vectorised level-by-level traversal: one NumPy step per tree level.
+        Walks down the tree one level at a time, with one NumPy step per level.
         """
         X = self._check_predict_X(X)
         node = np.zeros(X.shape[0], dtype=np.int64)
@@ -436,7 +433,7 @@ class DecisionTreeClassifier:
     def predict_proba(self, X) -> np.ndarray:
         """Class probabilities, shape (n_samples, len(classes_)).
 
-        Columns follow ``classes_``; classes first seen after the last retrain
+        Columns follow classes_. Classes first seen after the last retrain
         get probability 0 until the next retrain.
         """
         leaf = self.apply(X)
@@ -448,11 +445,11 @@ class DecisionTreeClassifier:
         return out
 
     def predict(self, X) -> np.ndarray:
-        """Predicted labels, shape (n_samples,). Ties -> smallest label."""
+        """Predicted labels, shape (n_samples,). On a tie, the smallest label wins."""
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
     def predict_loop(self, X) -> np.ndarray:
-        """Reference per-sample (loop-based) prediction, for benchmarking."""
+        """Slow version that predicts one sample at a time, for the speed tests."""
         X = self._check_predict_X(X)
         out = np.empty(X.shape[0], dtype=np.int64)
         for i in range(X.shape[0]):
@@ -466,7 +463,7 @@ class DecisionTreeClassifier:
         return self.tree_classes_[np.argmax(counts, axis=1)]
 
     def score(self, X, y) -> float:
-        """Accuracy on ``(X, y)``."""
+        """Accuracy on (X, y)."""
         X, y = check_X_y(X, y)
         return float(np.mean(self.predict(X) == y))
 
@@ -486,7 +483,7 @@ class DecisionTreeClassifier:
 
     @property
     def feature_importances_(self) -> np.ndarray:
-        """Normalised total impurity decrease per feature (sums to 1, or all 0)."""
+        """Total impurity drop for each feature, scaled to add up to 1 (or all 0)."""
         if not self.is_fitted:
             raise NotFittedError("tree not trained")
         internal = np.nonzero(self.feature_ != _LEAF)[0]
@@ -500,13 +497,13 @@ class DecisionTreeClassifier:
         return imp / s if s > 0 else imp
 
     def export_text(self, feature_names=None, decimals: int = 3) -> str:
-        """Human-readable text rendering of the current tree."""
+        """The current tree written out as plain text."""
         if not self.is_fitted:
             raise NotFittedError("tree not trained")
         names = feature_names or [f"x{j}" for j in range(self.n_features_in_)]
         lines = []
 
-        def rec(node, depth):  # depth bounded by max_depth; recursion is fine here
+        def rec(node, depth):  # depth is limited by max_depth, so recursion is fine here
             pad = "|   " * depth
             if self.feature_[node] == _LEAF:
                 cls = self.tree_classes_[np.argmax(self.value_[node])]

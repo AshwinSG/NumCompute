@@ -1,13 +1,14 @@
-"""Drive a model or pipeline over a data stream and log per-chunk metrics.
+"""Run a model or pipeline over a stream of data and log metrics for each chunk.
 
-The standard evaluation protocol for online learning is **prequential**
-("test-then-train"): every chunk is first used to evaluate the current model
-and then to update it, so every prediction is made on unseen data.
+The usual way to score a model that learns as data arrives is test-then-train:
+each chunk is first used to test the current model and then to train it, so
+every prediction is made on data the model has not seen yet.
 
->>> trainer = StreamTrainer(pipe, metrics={"f1": StreamingF1()})
->>> for X_chunk, y_chunk in stream:
-...     trainer.process_chunk(X_chunk, y_chunk)   # score_chunk + fit_chunk
->>> trainer.history["cumulative_accuracy"]
+Example:
+    trainer = StreamTrainer(pipe, metrics={"f1": StreamingF1()})
+    for X_chunk, y_chunk in stream:
+        trainer.process_chunk(X_chunk, y_chunk)   # score_chunk, then fit_chunk
+    trainer.history["cumulative_accuracy"]
 """
 from __future__ import annotations
 
@@ -32,25 +33,25 @@ def _final(model):
 
 
 class StreamTrainer:
-    """Manage a model (or :class:`Pipeline`) + streaming metrics + logging.
+    """Holds a model (or Pipeline), its running metrics and a log for each chunk.
 
-    Parameters
-    ----------
-    model : object with ``partial_fit`` and ``predict`` (optionally
-        ``predict_proba`` for score-based metrics such as AUC).
-    metrics : dict[str, StreamingMetric], optional
-        Extra streaming metrics; their ``result()`` is logged after every
-        scored chunk. ``StreamingAccuracy`` is always tracked internally.
-    classes : array-like, optional
-        All labels, forwarded to ``partial_fit(classes=...)``.
-    pos_label : label used to pick the probability column for metrics with
-        ``requires_score=True``.
-    verbose : bool – emit an INFO log line per chunk.
+    Parameters:
+        model: any object with partial_fit and predict (and predict_proba if
+            you use score-based metrics such as AUC).
+        metrics: optional dict of name to StreamingMetric. Their result() is
+            logged after each scored chunk. StreamingAccuracy is always
+            tracked as well.
+        classes: optional list of all labels, passed on to
+            partial_fit(classes=...).
+        pos_label: the label whose probability column is used by metrics
+            with requires_score=True.
+        verbose: if True, write one INFO log line per chunk.
 
-    Attributes
-    ----------
-    history : dict[str, list] – one entry per chunk (NaN where not applicable)
-    last_y_true_, last_y_pred_ : arrays from the most recent scored chunk
+    Attributes:
+        history: dict of lists with one entry per chunk (NaN where a value
+            does not apply).
+        last_y_true_, last_y_pred_: labels and predictions from the last
+            scored chunk.
     """
 
     def __init__(self, model, metrics: Optional[Dict[str, StreamingMetric]] = None,
@@ -96,10 +97,10 @@ class StreamTrainer:
 
     # ------------------------------------------------------------- actions
     def score_chunk(self, X_chunk, y_chunk) -> Optional[dict]:
-        """Evaluate the current model on a chunk and update all metrics.
+        """Test the current model on a chunk and update all metrics.
 
         Returns the logged values, or None if the model has not been trained
-        yet (e.g. a buffered tree before its first retrain).
+        yet (for example a buffered tree before its first retrain).
         """
         y = np.asarray(y_chunk)
         rec = self._record()
@@ -127,7 +128,7 @@ class StreamTrainer:
         return dict(rec)
 
     def fit_chunk(self, X_chunk, y_chunk) -> dict:
-        """Update the model with a chunk; logs time, memory and retrain count."""
+        """Train the model on a chunk and log the time, memory and retrain count."""
         rec = self._record()
         rec["n_samples"] = int(np.asarray(y_chunk).shape[0])
         kw = {"classes": self.classes} if self.classes is not None else {}
@@ -148,14 +149,14 @@ class StreamTrainer:
         return out
 
     def process_chunk(self, X_chunk, y_chunk) -> dict:
-        """Prequential step: ``score_chunk`` then ``fit_chunk``."""
+        """One test-then-train step: score_chunk, then fit_chunk."""
         self.score_chunk(X_chunk, y_chunk)
         return self.fit_chunk(X_chunk, y_chunk)
 
     def run(self, stream: Iterable, flush: bool = False) -> Dict[str, list]:
-        """Consume an iterable of ``(X_chunk, y_chunk)`` prequentially.
+        """Go through (X_chunk, y_chunk) pairs, testing and then training on each.
 
-        ``flush=True`` retrains on any leftover buffered samples at the end.
+        flush=True retrains on any samples still left in the buffer at the end.
         """
         for X_chunk, y_chunk in stream:
             self.process_chunk(X_chunk, y_chunk)

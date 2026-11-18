@@ -49,9 +49,9 @@ def test_streaming_equals_batch(rng, cls, fn):
 
 def test_rolling_window_metric():
     m = StreamingAccuracy(window=2)
-    m.update([1, 1], [0, 0])        # 0 % – will fall out
-    m.update([1, 1], [1, 1])        # 100 %
-    m.update([1, 1], [1, 0])        # 50 %
+    m.update([1, 1], [0, 0])        # 0%, will drop out of the window
+    m.update([1, 1], [1, 1])        # 100%
+    m.update([1, 1], [1, 0])        # 50%
     assert m.result() == pytest.approx(0.75)
     m.reset()
     assert m.result() == 0.0

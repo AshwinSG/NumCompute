@@ -1,16 +1,15 @@
-"""Streaming-capable preprocessing transformers.
+"""Preprocessing transformers that can learn from data one chunk at a time.
 
-Every transformer implements
+Every transformer has:
+    partial_fit(X_chunk)  update what it has learned with one chunk
+    fit(X)                reset(), then partial_fit(X)
+    transform(X)          apply what it has learned so far
+    fit_transform(X)      fit, then transform
+    reset()
 
-* ``partial_fit(X_chunk)``  – update learned state with one chunk
-* ``fit(X)``                – ``reset()`` then ``partial_fit(X)``
-* ``transform(X)``          – apply the *current* state
-* ``fit_transform(X)``      – fit then transform
-* ``reset()``
-
-Input ``X`` has shape ``(n_samples, n_features)``; statistics are per-feature
-(``axis=0``). NaNs are ignored when learning and propagated by scalers (fill
-them with :class:`SimpleImputer`).
+X has shape (n_samples, n_features). Statistics are worked out for each
+feature (axis=0). NaNs are skipped while learning and passed straight through
+by the scalers (fill them with SimpleImputer).
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ from .utils import NotFittedError, check_array
 
 
 class _Transformer:
-    """Mixin providing fit / fit_transform on top of partial_fit."""
+    """Base class that adds fit and fit_transform on top of partial_fit."""
 
     def fit(self, X, y=None):
         self.reset()
@@ -40,26 +39,25 @@ class _Transformer:
 
 # --------------------------------------------------------------------------- #
 class StandardScaler(_Transformer):
-    """Standardise features: ``(X - mean) / std`` with running statistics.
+    """Scale features to (X - mean) / std using running statistics.
 
-    Parameters
-    ----------
-    method : {"welford", "ema"}, default "welford"
-        ``"welford"`` – exact running mean/variance over the whole stream
-        (Chan's parallel form of Welford's algorithm, vectorised per chunk).
-        ``"ema"`` – exponentially-weighted mean/variance that tracks drifting
-        streams; each chunk is blended in with weight ``alpha``.
-    alpha : float, default 0.1
-        Smoothing factor for ``method="ema"`` (0 < alpha <= 1).
-    with_mean, with_std : bool
-    allow_growth : bool, default False
-        Accept chunks with additional trailing columns (e.g. new one-hot
-        columns); past rows are assumed to be 0 in those columns.
+    Parameters:
+        method: "welford" or "ema", default "welford".
+            "welford" gives the exact running mean and variance over the
+            whole stream (Welford's method, done one chunk at a time).
+            "ema" gives a moving average of the mean and variance that
+            follows data that changes over time. Each chunk is mixed in with
+            weight alpha.
+        alpha: float, default 0.1. How much weight each new chunk gets when
+            method="ema" (0 < alpha <= 1).
+        with_mean, with_std: bool
+        allow_growth: bool, default False. Accept chunks with extra columns
+            at the end (for example new one-hot columns). Earlier rows are
+            taken to be 0 in those columns.
 
-    Notes
-    -----
-    Zero-variance features get ``scale_ = 1`` so they map to 0 instead of
-    dividing by zero. NaNs pass through unchanged.
+    Notes:
+        Features with zero variance get scale_ = 1, so they become 0 instead
+        of causing a divide by zero. NaNs pass through unchanged.
     """
 
     def __init__(self, method: str = "welford", alpha: float = 0.1,
@@ -104,7 +102,7 @@ class StandardScaler(_Transformer):
                 self._check_width(X, self._ema_mean.shape[0])
         a = np.where(cnt > 0, np.where(self._ema_seen, self.alpha, 1.0), 0.0)
         delta = cmean - self._ema_mean
-        # exponentially-weighted variance merge (West, 1979)
+        # update the moving mean and variance (West, 1979)
         self._ema_var = (1 - a) * (self._ema_var + a * delta * delta) + a * cvar
         self._ema_mean = self._ema_mean + a * delta
         self._ema_seen = self._ema_seen | (cnt > 0)
@@ -161,9 +159,9 @@ class StandardScaler(_Transformer):
 
 # --------------------------------------------------------------------------- #
 class MinMaxScaler(_Transformer):
-    """Scale features to ``feature_range`` using the running min / max.
+    """Scale features into feature_range using the running min and max.
 
-    Constant features (max == min) map to the lower end of the range.
+    Features that never change (max == min) map to the low end of the range.
     """
 
     def __init__(self, feature_range: tuple = (0.0, 1.0)):
@@ -193,26 +191,22 @@ class MinMaxScaler(_Transformer):
 
 # --------------------------------------------------------------------------- #
 class SimpleImputer(_Transformer):
-    """Fill NaNs with statistics that are updated on the fly.
+    """Fill NaNs with values that are updated as new chunks arrive.
 
-    Parameters
-    ----------
-    strategy : {"mean", "median", "most_frequent", "constant"}
-        ``mean`` uses exact running means; ``median`` uses a reservoir sample
-        (exact until ``capacity`` rows); ``most_frequent`` keeps running value
-        counts (ties broken by the smallest value); ``constant`` always uses
-        ``fill_value``.
-    fill_value : float, default 0.0
-        Used for ``strategy="constant"`` and for features that have not yet
-        had a single observed value.
-    capacity : int
-        Reservoir size for ``strategy="median"``.
-    allow_growth : bool
-        Accept chunks with additional trailing columns (``mean`` only).
+    Parameters:
+        strategy: "mean", "median", "most_frequent" or "constant".
+            mean uses exact running means. median uses a random sample
+            (exact until capacity rows). most_frequent keeps running counts
+            of each value (on a tie, the smallest value wins). constant
+            always uses fill_value.
+        fill_value: float, default 0.0. Used for strategy="constant" and for
+            features that have not had any value yet.
+        capacity: int. Size of the random sample for strategy="median".
+        allow_growth: bool. Accept chunks with extra columns at the end
+            (mean only).
 
-    Attributes
-    ----------
-    statistics_ : ndarray (n_features,)  current fill values
+    Attributes:
+        statistics_: array (n_features,), the current fill values
     """
 
     _STRATEGIES = ("mean", "median", "most_frequent", "constant")
@@ -233,7 +227,7 @@ class SimpleImputer(_Transformer):
         self._n_features = None
         self._stats = StreamingStats(growth_fill=0.0 if self.allow_growth else None)
         self._quant = StreamingQuantile(self.capacity, self.random_state)
-        self._counts = None  # list of dict value -> count
+        self._counts = None  # one dict per column: value -> count
         return self
 
     def partial_fit(self, X, y=None):
@@ -282,28 +276,27 @@ class SimpleImputer(_Transformer):
 
 # --------------------------------------------------------------------------- #
 class OneHotEncoder(_Transformer):
-    """One-hot encode categorical columns, expanding categories incrementally.
+    """Turn category columns into 0/1 columns, adding new categories as they appear.
 
-    Output layout is ``[passthrough columns..., one-hot block]``. New
-    categories are always appended at the **end** of the one-hot block (in
-    order of first appearance), so previously emitted columns never move –
-    downstream streaming components only see trailing columns appear (see
-    ``allow_growth`` on scalers/imputers and the tree's buffer padding).
+    The output is [other columns..., one-hot columns]. New categories are
+    always added at the end of the one-hot columns (in the order they first
+    appear), so columns that were already output never move. Later steps
+    only see new columns added at the end (see allow_growth on the scalers
+    and imputer, and the padding in the tree's buffer).
 
-    Parameters
-    ----------
-    columns : sequence of int or None
-        Indices of categorical columns. None = all columns are categorical.
-    handle_unknown : {"ignore", "error"}
-        Behaviour in ``transform`` for categories not seen by ``partial_fit``.
-        ``ignore`` emits an all-zero block.
+    Parameters:
+        columns: list of int or None. Indices of the category columns. None
+            means every column is a category column.
+        handle_unknown: "ignore" or "error". What transform does with a
+            category that partial_fit has not seen. "ignore" outputs all
+            zeros.
 
-    Missing values (``None`` / NaN) always encode as an all-zero block.
+    Missing values (None or NaN) always become all zeros.
 
-    Attributes
-    ----------
-    categories_ : dict {column index -> list of categories (str)}
-    feature_map_ : list of (column index, category) for each one-hot column
+    Attributes:
+        categories_: dict of column index to a list of categories (str)
+        feature_map_: list of (column index, category), one for each one-hot
+            column
     """
 
     def __init__(self, columns: Optional[Sequence[int]] = None,
@@ -317,13 +310,13 @@ class OneHotEncoder(_Transformer):
     def reset(self):
         self.categories_ = None
         self.feature_map_ = []
-        self._index = {}  # (col, cat) -> output position within one-hot block
+        self._index = {}  # (col, cat) -> position in the one-hot columns
         self._n_features = None
         return self
 
     @staticmethod
     def _as_str(col: np.ndarray):
-        """Return (string tokens, missing mask) for a raw column."""
+        """Return (string values, missing mask) for a raw column."""
         col = np.asarray(col, dtype=object)
         miss = np.array([v is None or (isinstance(v, float) and v != v) for v in col],
                         dtype=bool)
@@ -348,7 +341,8 @@ class OneHotEncoder(_Transformer):
             self.categories_ = {c: [] for c in cols}
         for c in cols:
             tokens, miss = self._as_str(X[:, c])
-            # np.unique sorts; re-order by first appearance for determinism
+            # np.unique sorts the values; put them back in order of first
+            # appearance so the result is always the same
             uniq, first = np.unique(tokens[~miss].astype(str), return_index=True)
             for cat in uniq[np.argsort(first)].tolist():
                 if (c, cat) not in self._index:

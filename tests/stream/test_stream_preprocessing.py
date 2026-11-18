@@ -28,8 +28,8 @@ def test_standard_scaler_ema_tracks_drift(rng):
         chunk = rng.normal(mu, 1, size=(50, 1))
         sc_w.partial_fit(chunk)
         sc_e.partial_fit(chunk)
-    assert abs(sc_e.mean_[0] - 100) < 1.0      # EMA follows the new regime
-    assert abs(sc_w.mean_[0] - 50) < 1.0       # Welford reports the global mean
+    assert abs(sc_e.mean_[0] - 100) < 1.0      # EMA follows the new values
+    assert abs(sc_w.mean_[0] - 50) < 1.0       # Welford gives the mean over all data
 
 
 def test_scaler_propagates_nan_and_validates_width():
@@ -92,7 +92,7 @@ def test_onehot_unknown_and_missing():
 
 
 def test_scaler_growth_matches_zero_padded_batch():
-    """allow_growth assumes past rows were 0 in new columns -> exact for one-hot."""
+    """allow_growth treats past rows as 0 in new columns, which is exact for one-hot."""
     sc = StandardScaler(allow_growth=True)
     sc.partial_fit(np.array([[1.0], [2.0]]))
     sc.partial_fit(np.array([[3.0, 1.0], [4.0, 0.0]]))

@@ -1,13 +1,12 @@
-"""Shared validation helpers and exceptions for NumCompute.
+"""Shared input checks and errors for NumCompute.
 
-Shape conventions used throughout the package
----------------------------------------------
-* ``X`` : 2-D array of shape ``(n_samples, n_features)``. Rows are samples,
-  columns are features; every "per-feature" statistic is computed along
-  ``axis=0``.
-* ``y`` : 1-D array of shape ``(n_samples,)``.
-* A 1-D ``X`` is *not* silently reshaped – an explicit error is raised so
-  that ``(n,)`` vs ``(1, n)`` ambiguity never goes unnoticed.
+Shape rules used across the package:
+    X is a 2-D array with shape (n_samples, n_features). Rows are samples and
+    columns are features. Every per-feature statistic is worked out along
+    axis=0.
+    y is a 1-D array with shape (n_samples,).
+    A 1-D X is not reshaped for you. An error is raised instead, so a mix-up
+    between (n,) and (1, n) is never missed.
 """
 from __future__ import annotations
 
@@ -15,31 +14,24 @@ import numpy as np
 
 
 class NotFittedError(RuntimeError):
-    """Raised when a method that needs learned state is called too early."""
+    """Raised when a method that needs a trained model is called too early."""
 
 
 def check_array(X, name: str = "X", ndim: int = 2, dtype=float,
                 allow_nan: bool = True, allow_empty: bool = False) -> np.ndarray:
-    """Convert ``X`` to a NumPy array and validate its shape.
+    """Turn X into a NumPy array and check its shape.
 
-    Parameters
-    ----------
-    X : array-like
-    name : str
-        Name used in error messages.
-    ndim : int
-        Required number of dimensions (1 or 2).
-    dtype : numpy dtype or None
-        Target dtype. ``None`` keeps the inferred dtype (e.g. object arrays
-        holding categorical strings).
-    allow_nan : bool
-        If False, NaN values raise ``ValueError``.
-    allow_empty : bool
-        If False, arrays with zero samples raise ``ValueError``.
+    Parameters:
+        X: array-like input.
+        name: name used in error messages.
+        ndim: number of dimensions X must have (1 or 2).
+        dtype: dtype to convert to. None keeps the dtype NumPy picks (for
+            example object arrays that hold category strings).
+        allow_nan: if False, NaN values raise ValueError.
+        allow_empty: if False, arrays with 0 rows raise ValueError.
 
-    Returns
-    -------
-    np.ndarray
+    Returns:
+        np.ndarray
     """
     if X is None:
         raise TypeError(f"{name} must be array-like, got None")
@@ -68,12 +60,11 @@ def check_array(X, name: str = "X", ndim: int = 2, dtype=float,
 
 
 def check_X_y(X, y, dtype_X=float, allow_nan: bool = True):
-    """Validate a feature matrix and label vector of matching length.
+    """Check a feature matrix and a label vector of the same length.
 
-    Returns
-    -------
-    X : ndarray, shape (n_samples, n_features)
-    y : ndarray, shape (n_samples,)
+    Returns:
+        X with shape (n_samples, n_features)
+        y with shape (n_samples,)
     """
     X = check_array(X, "X", ndim=2, dtype=dtype_X, allow_nan=allow_nan)
     y = np.asarray(y)
@@ -91,7 +82,7 @@ def check_X_y(X, y, dtype_X=float, allow_nan: bool = True):
 
 
 def check_same_length(a, b, name_a: str = "y_true", name_b: str = "y_pred"):
-    """Validate two 1-D arrays have the same length; returns both as arrays."""
+    """Check that two 1-D arrays have the same length, and return both as arrays."""
     a = np.asarray(a).ravel() if np.ndim(a) == 2 and np.shape(a)[1] == 1 else np.asarray(a)
     b = np.asarray(b).ravel() if np.ndim(b) == 2 and np.shape(b)[1] == 1 else np.asarray(b)
     if a.ndim != 1 or b.ndim != 1:
@@ -103,10 +94,11 @@ def check_same_length(a, b, name_a: str = "y_true", name_b: str = "y_pred"):
 
 
 def nbytes_of(obj, _seen=None) -> int:
-    """Rough memory footprint (bytes) of NumPy arrays reachable from ``obj``.
+    """Rough memory use (in bytes) of all NumPy arrays that can be reached from obj.
 
-    Walks ``__dict__``, lists, tuples and dicts recursively. Only array
-    buffers are counted, which dominates memory for numerical models.
+    Looks inside __dict__, lists, tuples and dicts, and inside anything they
+    hold. Only array data is counted, since that is most of the memory for a
+    numeric model.
     """
     if _seen is None:
         _seen = set()

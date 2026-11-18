@@ -1,16 +1,15 @@
 """Reusable matplotlib plots for streaming experiments.
 
-Every function
+Every function:
+    takes an optional ax (draw into an existing figure), otherwise it makes
+    a new figure,
+    takes save_path (save as PNG, SVG or PDF, picked from the file
+    extension) and show (call plt.show() to display the plot),
+    returns (fig, ax) (or (fig, axes)) so you can change the plot further.
 
-* accepts an optional ``ax`` (draw into an existing figure) – otherwise a new
-  figure is created,
-* accepts ``save_path`` (write PNG/SVG/PDF, inferred from the extension) and
-  ``show`` (call ``plt.show()`` for inline / interactive display),
-* returns ``(fig, ax)`` (or ``(fig, axes)``) so callers can customise further.
-
-Colours use a fixed, colour-blind-validated categorical order; series identity
-is always also carried by a legend / direct label and a marker shape, never by
-colour alone.
+Colours come in a fixed order that works for colour-blind readers. Each line
+is also told apart by a legend or label and a marker shape, never by colour
+alone.
 """
 from __future__ import annotations
 
@@ -19,7 +18,7 @@ from typing import Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Fixed categorical order (never cycled); validated for CVD separation.
+# Fixed colour order (never reused). Checked to be easy to tell apart for colour-blind readers.
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
                  "#e87ba4", "#008300", "#6250d6", "#e34948"]
 MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
@@ -89,11 +88,11 @@ def plot_metric_over_time(metric_values: Sequence[float], title: str = "Metric o
                           save_path: Optional[str] = None, show: bool = False):
     """Line plot of one metric across chunks.
 
-    Parameters
-    ----------
-    metric_values : 1-D sequence, one value per chunk. NaN = not evaluated
-        (drawn as a gap, e.g. before the first retrain).
-    events : chunk indices to mark with faint vertical lines (e.g. retrains).
+    Parameters:
+        metric_values: 1-D list, one value per chunk. NaN means not scored
+            (drawn as a gap, for example before the first retrain).
+        events: chunk numbers to mark with light vertical lines (for example
+            retrains).
     """
     v = _as_series(metric_values, "metric_values")
     x = np.arange(v.size)
@@ -124,11 +123,11 @@ def compare_models(metric1: Sequence[float], metric2: Sequence[float],
                    xlabel: str = "Chunk", *more_metrics, ylim: Optional[tuple] = None,
                    ax=None, figsize=(8, 4), save_path: Optional[str] = None,
                    show: bool = False):
-    """Overlay two (or more) streaming metric curves, e.g. trees with
-    different ``buffer_size`` values.
+    """Draw two (or more) metric lines on one plot, for example trees with
+    different buffer_size values.
 
-    Extra series can be passed positionally after ``xlabel``; ``labels`` must
-    then have one entry per series.
+    Extra lines can be passed after xlabel. labels must then have one entry
+    per line.
     """
     series = [_as_series(metric1, "metric1"), _as_series(metric2, "metric2")]
     series += [_as_series(m, f"metric{i + 3}") for i, m in enumerate(more_metrics)]
@@ -152,7 +151,7 @@ def compare_models(metric1: Sequence[float], metric2: Sequence[float],
         ax.legend(loc="best")
         ax.margins(x=0.12)
         if ends and len(series) <= 4:
-            # direct value labels at line ends, nudged apart so they never overlap
+            # value labels at the end of each line, moved apart so they never overlap
             lo, hi = ax.get_ylim()
             gap = 0.06 * (hi - lo)
             ends.sort()
@@ -169,14 +168,15 @@ def compare_models(metric1: Sequence[float], metric2: Sequence[float],
 def plot_predictions_vs_ground_truth(y_true, y_pred, title: str = "Latest chunk: predictions vs. ground truth",
                                      labels: Optional[Sequence] = None, figsize=(10, 4),
                                      save_path: Optional[str] = None, show: bool = False):
-    """Two panels for a classification chunk:
+    """Two plots for one chunk of classification results:
 
-    1. confusion matrix heat-map (true rows × predicted columns, counts shown),
-    2. per-class counts, actual vs. predicted, as grouped bars.
+    1. a confusion matrix heat map (true labels as rows, predicted labels as
+       columns, with counts shown),
+    2. the count of each class, actual and predicted, as side-by-side bars.
 
-    Returns ``(fig, (ax_cm, ax_bar))``.
+    Returns (fig, (ax_cm, ax_bar)).
     """
-    from .metrics import confusion_matrix  # local import avoids a cycle at import time
+    from .metrics import confusion_matrix  # imported here to stop an import loop
 
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -222,8 +222,8 @@ def plot_tradeoff(x_values: Sequence, left_values: Sequence[float], right_values
                   right_label: str = "Total retrain time (s)",
                   title: str = "buffer_size trade-off", figsize=(10, 4),
                   save_path: Optional[str] = None, show: bool = False):
-    """Two side-by-side panels sharing the x values (no dual y-axis), e.g.
-    accuracy and retraining cost as a function of ``buffer_size``."""
+    """Two plots side by side that share the same x values (no second y axis),
+    for example accuracy and retrain cost for each buffer_size."""
     xs = [str(v) for v in x_values]
     with plt.rc_context(STYLE):
         fig, axes = plt.subplots(1, 2, figsize=figsize)
@@ -236,7 +236,7 @@ def plot_tradeoff(x_values: Sequence, left_values: Sequence[float], right_values
                             ha="center", fontsize=8, color=INK_2)
             ax.set(xlabel=xlabel, ylabel=lab, title=lab)
             ax.margins(y=0.15)
-        axes[1].set_ylim(bottom=0)  # costs are magnitudes: never truncate the axis
+        axes[1].set_ylim(bottom=0)  # costs start at 0, so do not cut off the bottom of the axis
         fig.suptitle(title, color=INK, fontweight="semibold")
         _finish(fig, save_path, show)
     return fig, axes

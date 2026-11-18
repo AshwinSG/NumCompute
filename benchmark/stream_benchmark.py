@@ -1,10 +1,10 @@
-"""Performance benchmarks for NumCompute 2.2.
+"""Speed tests for NumCompute 2.2.
 
-(a) Loop-based vs. vectorised implementations of the hot paths:
-    split search, tree prediction, streaming moments, confusion matrix.
-(b) Effect of ``buffer_size`` on a streaming run over ``data/sensor_stream.csv``
-    (prequential accuracy, accuracy after concept drift, number of retrains,
-    retraining time, memory).
+(a) Python loop versions against NumPy array versions of the slowest parts:
+    split search, tree prediction, running mean and variance, confusion matrix.
+(b) Effect of buffer_size on a streaming run over data/sensor_stream.csv
+    (test-then-train accuracy, accuracy after the drift, number of retrains,
+    retrain time, memory).
 
 Run:  python benchmark/stream_benchmark.py
 Outputs: benchmark/stream_results.md and PNG figures in benchmark/figures/.

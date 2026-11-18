@@ -37,7 +37,7 @@ def test_all_nan_column_gives_nan_not_error():
 
 
 def test_numerical_stability_large_offset(rng):
-    """Naive sum-of-squares fails at 1e9 offset; Chan/Welford merge must not."""
+    """The simple sum of squares method breaks when values are near 1e9; the Chan/Welford merge must not."""
     X = 1e9 + rng.normal(0, 1, size=(10_000, 1))
     s = StreamingStats()
     for chunk, _ in iter_array_chunks(X, chunk_size=128):
